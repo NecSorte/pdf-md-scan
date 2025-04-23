@@ -26,212 +26,205 @@ def detect_headings_style(doc):
     """Scan the document to determine base font size (paragraph text) and heading sizes."""
     size_counts = {}
     for page in doc:
-        blocks = page.get_text("dict")["blocks"]
-        for b in blocks:
-            if b.get("type") == 0:
-                for line in b.get("lines", []):
-                    for span in line.get("spans", []):
-                        fs = span.get("size", 0)
-                        key = round(fs, 1)
-                        size_counts[key] = size_counts.get(key, 0) + len(span.get("text", ""))
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    size = round(span.get("size", 0), 1)
+                    size_counts[size] = size_counts.get(size, 0) + len(span.get("text", ""))
     if not size_counts:
         return None, []
     base_size = max(size_counts, key=size_counts.get)
-    heading_sizes = [sz for sz in size_counts if sz > base_size * 1.1]
-    heading_sizes.sort(reverse=True)
-    return base_size, heading_sizes
+    headings = sorted([sz for sz in size_counts if sz > base_size * 1.1], reverse=True)
+    return base_size, headings
 
 
-def save_image(img_data, page_number, img_index, output_prefix):
+def save_image(img_data, page_num, img_idx, prefix):
     """Save image bytes to file and return the filename for markdown."""
-    fmt = img_data.get("ext", "png")
-    image_bytes = img_data.get("image")
-    if not image_bytes:
+    ext = img_data.get("ext", "png")
+    data = img_data.get("image")
+    if not data:
         return None
-    filename = f"{output_prefix}_page{page_number+1}_image{img_index+1}.{fmt}"
+    fname = f"{prefix}_page{page_num+1}_img{img_idx+1}.{ext}"
     try:
-        with open(filename, "wb") as img_file:
-            img_file.write(image_bytes)
+        with open(fname, 'wb') as f:
+            f.write(data)
     except Exception as e:
-        print(f"Error saving image for page {page_number+1}: {e}", file=sys.stderr)
+        print(f"Failed to save image: {e}", file=sys.stderr)
         return None
-    return filename
+    return fname
 
 
 def ocr_image_to_text(image_bytes):
-    """Use pytesseract to extract text from an image (if OCR is enabled)."""
-    if not OCR_ENABLED:
+    """Extract text from image if OCR is enabled."""
+    if not OCR_ENABLED or not USE_OCR:
         return ""
     try:
         img = Image.open(BytesIO(image_bytes))
+        return pytesseract.image_to_string(img).strip()
     except Exception:
         return ""
-    text = pytesseract.image_to_string(img)
-    return text.strip()
 
 
 def extract_pdf_to_markdown(pdf_path, password=None, output_file="output.md"):  # noqa: C901
+    # Open & authenticate
     try:
         doc = fitz.open(pdf_path)
     except Exception as e:
         print(f"Error opening PDF: {e}", file=sys.stderr)
         return False
     if doc.needs_pass:
-        if not password:
-            print("Password required but not provided.", file=sys.stderr)
-            return False
-        if not doc.authenticate(password):
-            print("Incorrect PDF password.", file=sys.stderr)
+        if not password or not doc.authenticate(password):
+            print("Invalid or missing PDF password.", file=sys.stderr)
             return False
 
+    # Determine heading/font sizes
     base_size, heading_sizes = detect_headings_style(doc)
-    level_map = {}
-    if heading_sizes:
-        level_map[heading_sizes[0]] = 3
+    level = {}
+    if len(heading_sizes) > 0:
+        level[heading_sizes[0]] = 3  # H3
     if len(heading_sizes) > 1:
-        level_map[heading_sizes[1]] = 4
+        level[heading_sizes[1]] = 4  # H4
 
-    md_lines = []
-    collected = []
+    md = []          # markdown lines
+    collected = []   # textual content for link/tag analysis
     tags = set()
-    inside_code = False
+    in_code = False
 
-    for page_num, page in enumerate(doc):
-        page_dict = page.get_text("dict")
-        for block in page_dict.get("blocks", []):
-            if block.get("type") == 0:
+    # Process each page
+    for pnum, page in enumerate(doc):
+        for block in page.get_text("dict").get("blocks", []):
+            btype = block.get("type")
+            # Text blocks
+            if btype == 0:
                 for line in block.get("lines", []):
                     spans = line.get("spans", [])
                     if not spans:
                         continue
-                    text = "".join(span.get("text", "") for span in spans)
-                    first = spans[0]
-                    fsize = round(first.get("size", 0), 1)
-                    fname = first.get("font", "")
-                    fcolor = first.get("color", 0)
-                    bold = "Bold" in fname
+                    text = ''.join(s.get('text','') for s in spans)
+                    hdr = spans[0]
+                    fsize = round(hdr.get('size',0),1)
+                    fname = hdr.get('font','')
+                    fcol = hdr.get('color',0)
+                    bold = 'Bold' in fname
 
                     # Headings
-                    if fsize in level_map:
-                        if inside_code:
-                            md_lines.append("```")
-                            inside_code = False
-                        md_lines.append(f"{'#'*level_map[fsize]} {text.strip()}")
+                    if fsize in level:
+                        if in_code:
+                            md.append('```')
+                            in_code = False
+                        md.append(f"{'#'*level[fsize]} {text.strip()}")
                         collected.append(text.strip())
                         continue
-                    if fsize == base_size and (bold or fcolor != 0):
-                        if inside_code:
-                            md_lines.append("```")
-                            inside_code = False
-                        md_lines.append(f"#### {text.strip()}")
+                    if fsize == base_size and (bold or fcol != 0):
+                        if in_code:
+                            md.append('```')
+                            in_code = False
+                        md.append(f"#### {text.strip()}")
                         collected.append(text.strip())
                         continue
 
                     # Lists
                     stripped = text.strip()
-                    indent = int(first.get("bbox", [0])[0] // 20)
+                    indent = int(hdr.get('bbox',[0])[0] // 20)
                     marker = None
-                    if stripped.startswith(('* ', '- ', '•', '◦', '▪')):
-                        marker = '-'
-                    else:
-                        m = re.match(r"^(\d+)[\.|\)]\s+", stripped)
-                        if m:
-                            marker = f"{m.group(1)}."
+                    if re.match(r'^[*\-•◦▪]', stripped):
+                        marker='-'
+                    elif re.match(r'^\d+[\.|\)]\s+', stripped):
+                        marker=re.match(r'^(\d+)[\.|\)]', stripped).group(1)+'.'
                     if marker:
-                        if inside_code:
-                            md_lines.append("```")
-                            inside_code = False
-                        indent_spaces = ' ' * 4 * indent
-                        content = re.sub(r'^[*\-•◦▪\d+[\.|\)]\s*', '', stripped)
-                        md_lines.append(f"{indent_spaces}{marker} {content}")
+                        if in_code:
+                            md.append('```')
+                            in_code=False
+                        content = re.sub(r'^([*\-•◦▪]|\d+[\.|\)])\s*','', stripped)
+                        md.append(' '*(4*indent)+f"{marker} {content}")
                         collected.append(content)
                         continue
 
-                    # Code blocks
-                    mono = any(m in fname for m in ("Courier", "Consolas", "Mono"))
-                    if mono:
-                        if not inside_code:
-                            md_lines.append("```")
-                            inside_code = True
-                        md_lines.append(text.rstrip())
+                    # Code detection (monospace font)
+                    if any(m in fname for m in ('Courier','Mono','Consolas')):
+                        if not in_code:
+                            md.append('```')
+                            in_code=True
+                        md.append(text.rstrip())
                         continue
-                    else:
-                        if inside_code:
-                            md_lines.append("```")
-                            inside_code = False
-                        md_lines.append(text.rstrip())
-                        collected.append(text.rstrip())
-            elif block.get("type") == 1:
-                img_index = block.get("number", 0)
-                path = save_image(block, page_num, img_index, output_prefix="extracted_image")
-                if path:
-                    if inside_code:
-                        md_lines.append("```")
-                        inside_code = False
-                    md_lines.append(f"![]({path})")
-                    if OCR_ENABLED and USE_OCR:
-                        ocr = ocr_image_to_text(block.get("image"))
-                        if ocr:
-                            md_lines.append(f"> OCR Extracted: {ocr}")
-                            collected.append(ocr)
-    if inside_code:
-        md_lines.append("```")
+                    if in_code:
+                        md.append('```')
+                        in_code=False
 
-    # Wikilinks
-    full_text = " ".join(collected)
-    words = re.findall(r"\b[A-Za-z][A-Za-z0-9]+\b", full_text)
-    stopwords = {"the","and","or","of","to","a","in","is","for","on","with","this","that","by","are"}
+                    # Normal text
+                    md.append(text.rstrip())
+                    collected.append(text.rstrip())
+
+            # Image blocks
+            elif btype == 1:
+                img = save_image(block, pnum, block.get('number',0), 'img')
+                if img:
+                    if in_code:
+                        md.append('```'); in_code=False
+                    md.append(f"![]({img})")
+                    ocrtxt = ocr_image_to_text(block.get('image'))
+                    if ocrtxt:
+                        md.append(f"> OCR: {ocrtxt}")
+                        collected.append(ocrtxt)
+
+    if in_code:
+        md.append('```')
+
+    # Prepare wikilinks & tags
+    text_blob = ' '.join(collected)
+    words = re.findall(r"\b[A-Za-z][A-Za-z0-9]+\b", text_blob)
+    stop = set(["the","and","or","of","to","a","in","is","for","on","with","this","that","by","are"])
     freq = {}
     for w in words:
         lw = w.lower()
-        if len(w) < 4 or lw in stopwords:
-            continue
-        freq[w] = freq.get(w, 0) + 1
-    bigrams = re.findall(r"\b(\w+) (\w+)\b", full_text)
-    for a, b in bigrams:
-        phrase = f"{a} {b}"
-        if all(len(x) >= 4 and x.lower() not in stopwords for x in (a, b)):
-            freq[phrase] = freq.get(phrase, 0) + 1
-    terms = [t for t, c in freq.items() if c >= 2]
-    terms.sort(key=len, reverse=True)
-    for i, line in enumerate(md_lines):
-        if line.startswith("```") or line.startswith("> OCR"):
-            continue
-        for term in terms:
-            pattern = r"\b" + re.escape(term) + r"\b"
-            md_lines[i] = re.sub(pattern, lambda m: f"[[{m.group(0)}]]" if not m.group(0).startswith("[[") else m.group(0), md_lines[i])
+        if len(w)<4 or lw in stop: continue
+        freq[w] = freq.get(w,0)+1
+    bigrams = re.findall(r"\b(\w+) (\w+)\b", text_blob)
+    for a,b in bigrams:
+        if len(a)>=4 and len(b)>=4 and a.lower() not in stop and b.lower() not in stop:
+            phrase=f"{a} {b}"
+            freq[phrase]=freq.get(phrase,0)+1
+    terms=[t for t,c in freq.items() if c>=2][:20]
+    patterns=[re.compile(r"\b"+re.escape(t)+r"\b") for t in terms]
 
-    # Tags
-    tl = full_text.lower()
-    for kw, tag in [("security", "#security"), ("assessment", "#assessment"), ("compliance", "#compliance"), ("network", "#network"), ("vulnerability", "#vulnerability"), (("methodology", "methods"), "#methodology")]:
-        if isinstance(kw, tuple):
-            if any(k in tl for k in kw):
-                tags.add(tag)
-        else:
-            if kw in tl:
-                tags.add(tag)
+    for i,line in enumerate(md):
+        if line.startswith('```') or line.startswith('> OCR'): continue
+        for pat in patterns:
+            if pat.search(line):
+                md[i]=pat.sub(lambda m: f"[[{m.group(0)}]]", line)
+                break
+
+    # Tags based on keywords
+    low=text_blob.lower()
+    tagmap={"security":"#security","assessment":"#assessment","compliance":"#compliance","network":"#network","vulnerability":"#vulnerability","methodology":"#methodology"}
+    for k,tag in tagmap.items():
+        if k in low:
+            tags.add(tag)
     if tags:
-        md_lines.append("\n" + " ".join(sorted(tags)))
+        md.append('\n'+ ' '.join(sorted(tags)))
 
+    # Write output
     try:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(md_lines))
+        with open(output_file,'w',encoding='utf-8') as f:
+            f.write('\n'.join(md))
     except Exception as e:
-        print(f"Error writing output file: {e}", file=sys.stderr)
+        print(f"Failed writing output: {e}",file=sys.stderr)
         return False
 
-    print(f"Markdown generated: {output_file}")
+    print(f"Generated: {output_file}")
     return True
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert a PDF to Obsidian-optimized Markdown.")
-    parser.add_argument("input_pdf", help="Path to the input PDF file.")
-    parser.add_argument("-p", "--password", help="PDF password (if encrypted)", default=None)
-    parser.add_argument("-o", "--output", help="Output markdown file", default="output.md")
-    parser.add_argument("--ocr", help="Enable OCR for images", action="store_true")
-    args = parser.parse_args()
-    USE_OCR = args.ocr
+if __name__=='__main__':
+    p=argparse.ArgumentParser()
+    p.add_argument('input_pdf')
+    p.add_argument('-p','--password',default=None)
+    p.add_argument('-o','--output',default='output.md')
+    p.add_argument('--ocr',action='store_true')
+    args=p.parse_args()
+    USE_OCR=args.ocr
     if args.ocr and not OCR_ENABLED:
-        print("OCR requested but dependencies missing; skipping OCR.", file=sys.stderr)
+        print("OCR dependencies missing; skipping OCR.",file=sys.stderr)
     extract_pdf_to_markdown(args.input_pdf, password=args.password, output_file=args.output)
