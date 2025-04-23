@@ -14,7 +14,10 @@ try:
     import pytesseract
     OCR_ENABLED = True
 except ImportError:
-    OCR_ENABLED = False  # OCR is optional; enable if Pillow and pytesseract are installed
+    OCR_ENABLED = False
+
+# Will be set from the CLI --ocr flag
+USE_OCR = False
 
 def detect_headings_style(doc):
     """Scan the document to determine base font size (paragraph text) and heading sizes."""
@@ -198,12 +201,11 @@ def extract_pdf_to_markdown(pdf_path, password=None, output_file="output.md"):
                     # Embed the image in markdown
                     md_lines.append(f"![]({img_path})")
                     # Optionally, perform OCR on the image and include text (as blockquote for example)
-                    if OCR_ENABLED:
-                        ocr_text = ocr_image_to_text(block.get("image"))
-                        if ocr_text:
-                            # Include OCR text as a blockquote (so it's slightly indented and distinguished)
-                            md_lines.append(f"> OCR Extracted: {ocr_text}")
-                            collected_text_for_links.append(ocr_text)
+                    if OCR_ENABLED and USE_OCR:
+    ocr_text = ocr_image_to_text(block.get("image"))
+    if ocr_text:
+        md_lines.append(f"> OCR Extracted: {ocr_text}")
+        collected_text_for_links.append(ocr_text)
     # After looping all pages, ensure any open code block is closed
     if md_lines and md_lines[-1].startswith("```") and md_lines[-1] != "```":
         md_lines.append("```")
@@ -299,6 +301,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", help="Output markdown file path.", default="output.md")
     parser.add_argument("--ocr", help="Enable OCR for images (requires pytesseract).", action="store_true")
     args = parser.parse_args()
+    USE_OCR = args.ocr
     if args.ocr:
         if not OCR_ENABLED:
             print("OCR requested, but pytesseract/Pillow not installed. Proceeding without OCR.", file=sys.stderr)
